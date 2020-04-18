@@ -1,4 +1,5 @@
 #![warn(rust_2018_idioms)]
+#![deny(unsafe_code)]
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]

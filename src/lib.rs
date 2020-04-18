@@ -1,5 +1,5 @@
 #![warn(rust_2018_idioms)]
-#![deny(missing_docs)]
+#![deny(missing_docs, unsafe_code)]
 
 //! An in memory key value store
 //!
