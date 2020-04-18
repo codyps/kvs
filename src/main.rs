@@ -3,18 +3,10 @@ use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 enum KvsOpt {
-    Set {
-        key: String,
-        value: String,
-    },
-    Get {
-        key: String
-    },
-    Rm {
-        key: String
-    }
+    Set { key: String, value: String },
+    Get { key: String },
+    Rm { key: String },
 }
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = KvsOpt::from_args();
