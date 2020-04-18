@@ -1,32 +1,32 @@
 #![warn(rust_2018_idioms)]
+use structopt::StructOpt;
 
-use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, SubCommand};
+#[derive(Debug, StructOpt)]
+enum KvsOpt {
+    Set {
+        key: String,
+        value: String,
+    },
+    Get {
+        key: String
+    },
+    Rm {
+        key: String
+    }
+}
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new(crate_name!())
-        .version(crate_version!())
-        .author(crate_authors!())
-        .about(crate_description!())
-        .subcommand(
-            SubCommand::with_name("set")
-                .arg(Arg::with_name("KEY").index(1).required(true))
-                .arg(Arg::with_name("VALUE").index(2).required(true)),
-        )
-        .subcommand(SubCommand::with_name("get").arg(Arg::with_name("KEY").index(1).required(true)))
-        .subcommand(SubCommand::with_name("rm").arg(Arg::with_name("KEY").index(1).required(true)))
-        .get_matches();
+    let opt = KvsOpt::from_args();
 
     let mut kvs = kvs::KvStore::default();
-    match matches.subcommand() {
-        ("set", Some(sub_m)) => {
-            let k = sub_m.value_of("KEY").unwrap();
-            let v = sub_m.value_of("VALUE").unwrap();
-
-            kvs.set(k.to_owned(), v.to_owned());
-            println!("set: {:?} => {:?}", k, v)
+    match opt {
+        KvsOpt::Set { key, value } => {
+            kvs.set(key.clone(), value.clone());
+            println!("set: {:?} => {:?}", key, value)
         }
-        ("get", Some(sub_m)) => {
-            let k = sub_m.value_of("KEY").unwrap();
+        KvsOpt::Get { key } => {
+            let k = key;
 
             let r = kvs.get(k.to_owned());
             match r {
@@ -39,14 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        ("rm", Some(sub_m)) => {
-            let k = sub_m.value_of("KEY").unwrap();
+        KvsOpt::Rm { key } => {
+            let k = key;
 
             kvs.remove(k.to_owned());
             println!("remove: {:?}", k);
-        }
-        (s, _v) => {
-            panic!("unknown subcommand: {}", s);
         }
     }
 
