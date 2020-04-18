@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// A in memory key value store
 #[derive(Default, Debug)]
 pub struct KvStore {
-    v: HashMap<String, String> 
+    v: HashMap<String, String>,
 }
 
 impl KvStore {
