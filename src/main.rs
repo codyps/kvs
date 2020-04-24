@@ -12,20 +12,18 @@ enum KvsOpt {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = KvsOpt::from_args();
 
-    let mut kvs = kvs::KvStore::default();
+    let mut kvs = kvs::KvStore::open(".")?;
     match opt {
         KvsOpt::Set { key, value } => {
-            kvs.set(key.clone(), value.clone());
-            println!("set: {:?} => {:?}", key, value)
+            kvs.set(key.clone(), value.clone())?;
         }
         KvsOpt::Get { key } => {
             let k = key;
 
-            let r = kvs.get(k.to_owned());
+            let r = kvs.get(k.to_owned())?;
             match r {
                 None => {
-                    eprintln!("key nonexistent: {:?}", k);
-                    return Err("no such key".into());
+                    println!("Key not found");
                 }
                 Some(v) => {
                     println!("{}", v);
@@ -35,8 +33,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         KvsOpt::Rm { key } => {
             let k = key;
 
-            kvs.remove(k.to_owned());
-            println!("remove: {:?}", k);
+            match kvs.remove(k.to_owned()) {
+                Err(kvs::KvsError::RemoveNonexistentKey { key: _ }) => {
+                    println!("Key not found");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    println!("{}", e);
+                    std::process::exit(1);
+                }
+                Ok(_) => {},
+            }
         }
     }
 
