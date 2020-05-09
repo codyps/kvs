@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs::{self, File};
+use std::io::{self, Seek};
 
 use snafu::{ResultExt, Snafu};
 
@@ -85,6 +86,54 @@ pub enum KvsError {
         /// io error
         source: std::io::Error,
     },
+
+    /// Error determining position in file
+    #[snafu(display("Could not determine offset in {}: {}", filename.display(), source))]
+    GetPosition {
+        /// io error
+        source: std::io::Error,
+        /// file we were accessing
+        filename: PathBuf,
+    },
+
+    /// Looking up a previously recorded log entry failed
+    #[snafu(display("Log lookup of {} in {} at offset {} failed: {}", key, filename.display(), offs, source))]
+    LogLookup {
+        /// Looking for the value of this key
+        key: String,
+        /// We had this error occur
+        source: speedy::Error,
+        /// in this file
+        filename: PathBuf,
+        /// after seeking to this offset
+        offs: u64,
+    },
+
+    /// Instead of finding a LogEntry::Insert, we found some other log entry
+    #[snafu(display("Log entry for {} in {} at offset {} invalid (found key {})", key, filename.display(), offs, found_key))]
+    LogEntryKindInvalid {
+        /// The key we were looking for
+        key: String,
+        /// the file
+        filename: PathBuf,
+        /// the offset we read from
+        offs: u64,
+        /// the key we found there
+        found_key: String,
+    },
+
+    /// We found an insert record, but it was for the wrong key
+    #[snafu(display("Log entry contains key {} instead of {} at offset {} in {}", found_key, key, offs, filename.display()))]
+    LogEntryKeyMismatch {
+        /// the key we wanted to find
+        key: String,
+        /// the key that was actually stored
+        found_key: String,
+        /// the offset in the file
+        offs: u64,
+        /// the file
+        filename: PathBuf,
+    }
 }
 
 #[derive(Debug)]
@@ -102,7 +151,7 @@ pub type Result<T> = std::result::Result<T, KvsError>;
 pub struct KvStore {
     log_f_name: PathBuf,
     log_f: File, 
-    cache: HashMap<String, String>,
+    cache: HashMap<String, u64>,
     safe: bool,
 }
 
@@ -121,6 +170,8 @@ impl KvStore {
             use speedy::IsEof;
             let mut entry_number = 0usize;
             loop {
+                let offs = log_f_r.seek(io::SeekFrom::Current(0))
+                    .context(GetPosition { filename: p.clone() })?;
                 let entry = match LogEntry::read_from_stream(&mut log_f_r) {
                     Ok(v) => v,
                     Err(e) => {
@@ -133,8 +184,8 @@ impl KvStore {
                 };
 
                 match entry {
-                    LogEntry::Set { key, value } => {
-                        cache.insert(key, value);
+                    LogEntry::Set { key, value: _ } => {
+                        cache.insert(key, offs);
                     },
                     LogEntry::Remove { key } => {
                         cache.remove(&key);
@@ -155,12 +206,12 @@ impl KvStore {
 
     /// set a `key` in the store to `value`
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.cache.insert(key.clone(), value.clone());
+        let offs = self.log_f.seek(io::SeekFrom::End(0))
+            .context(GetPosition { filename: self.log_f_name.clone() })?;
+        LogEntry::Set { key: key.clone(), value: value.clone() }.write_to_stream(&mut std::io::BufWriter::new(&mut self.log_f))
+            .with_context(|| LogAppendSet { key: key.clone(), value: value.clone() })?;
 
-        {
-            LogEntry::Set { key: key.clone(), value: value.clone() }.write_to_stream(&mut std::io::BufWriter::new(&mut self.log_f))
-                .with_context(|| LogAppendSet { key: key.clone(), value: value.clone() })?;
-        }
+        self.cache.insert(key.clone(), offs);
 
         if self.safe {
             self.log_f.sync_all().with_context(|| LogSync { key })?;
@@ -169,8 +220,37 @@ impl KvStore {
     }
 
     /// retrieve the value of `key`. if no value, return None
-    pub fn get(&self, key: String) -> Result<Option<String>> {
-        Ok(self.cache.get(&key).cloned())
+    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+        match self.cache.get(&key) {
+            Some(&offs) => {
+                self.log_f.seek(io::SeekFrom::Start(offs))
+                    .context(GetPosition { filename: self.log_f_name.clone() })?;
+
+                let mut log_f_r = std::io::BufReader::with_capacity(8192, &mut self.log_f);
+                let entry = match LogEntry::read_from_stream(&mut log_f_r) {
+                    Ok(v) => v,
+                    Err(e) => {
+                       return Err(e).context(LogLookup { offs, filename: self.log_f_name.clone(), key: key.clone() }).into();
+                    }
+                };
+
+                match entry {
+                    LogEntry::Set { key: found_key, value } => {
+                        if found_key != key {
+                            return Err(KvsError::LogEntryKeyMismatch { key: key.clone(), found_key, filename: self.log_f_name.clone(), offs }).into();
+                        }
+
+                        Ok(Some(value))
+                    },
+                    LogEntry::Remove { key: found_key } => {
+                        return Err(KvsError::LogEntryKindInvalid { offs, filename: self.log_f_name.clone(), key: key.clone(), found_key }).into();
+                    }
+                }
+            },
+            None => {
+                Ok(None)
+            }
+        }
     }
 
     /// remove an entry by `key`
@@ -178,6 +258,8 @@ impl KvStore {
         self.cache.remove(&key).ok_or(KvsError::RemoveNonexistentKey { key: key.clone() })?;
 
         {
+            self.log_f.seek(io::SeekFrom::End(0))
+                .context(GetPosition { filename: self.log_f_name.clone() })?;
             LogEntry::Remove { key: key.clone() }.write_to_stream(&mut std::io::BufWriter::new(&mut self.log_f))
                 .with_context(|| LogAppendRemove { key: key.clone() })?;
         }
