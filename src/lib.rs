@@ -16,7 +16,12 @@ use std::path::PathBuf;
 use std::fs::{self, File};
 
 use snafu::{ResultExt, Snafu};
+
+#[cfg(not(feature = "speedy"))]
 use serde::{Serialize, Deserialize};
+
+#[cfg(feature = "speedy")]
+use speedy::{Readable, Writable};
 
 // capnp codegen elides these, allow it
 #[cfg(feature = "capnproto")]
@@ -51,6 +56,9 @@ pub enum KvsError {
         /// bincode error
         #[cfg(feature = "bincode")]
         source: bincode::Error,
+        /// speedy error
+        #[cfg(feature = "speedy")]
+        source: speedy::Error,
     },
 
     #[cfg(feature = "capnproto")]
@@ -99,6 +107,9 @@ pub enum KvsError {
         /// bincode error
         #[cfg(feature = "bincode")]
         source: bincode::Error,
+        /// speedy error
+        #[cfg(feature = "speedy")]
+        source: speedy::Error,
     },
 
     /// append remove failed
@@ -115,6 +126,9 @@ pub enum KvsError {
         /// bincode error
         #[cfg(feature = "bincode")]
         source: bincode::Error,
+        /// speedy error
+        #[cfg(feature = "speedy")]
+        source: speedy::Error,
     },
 
     /// Key not found when removing
@@ -134,7 +148,9 @@ pub enum KvsError {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
+#[cfg_attr(not(feature = "speedy"), derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "speedy", derive(Readable, Writable))]
 enum LogEntry {
     Set { key: String, value: String },
     Remove { key: String },
@@ -194,7 +210,6 @@ impl KvStore {
                         // XXX: this is total shit
                         if e.kind == capnp::ErrorKind::Failed &&
                             e.description == "failed to fill whole buffer" {
-
                                 break;
                         }
                         
@@ -250,10 +265,40 @@ impl KvStore {
             }
         }
 
+        #[cfg(feature = "speedy")]
+        {
+            use speedy::IsEof;
+            let mut entry_number = 0usize;
+            loop {
+                let entry = match LogEntry::read_from_stream(&mut log_f_r) {
+                    Ok(v) => v,
+                    Err(e) => {
+                       if e.is_eof() {
+                           break;
+                       }
+
+                       return Err(e).context(LogParse { entry_number })?;
+                    }
+                };
+
+                match entry {
+                    LogEntry::Set { key, value } => {
+                        cache.insert(key, value);
+                    },
+                    LogEntry::Remove { key } => {
+                        cache.remove(&key);
+                    }
+                }
+
+                entry_number += 1;
+            }
+        }
+
         #[cfg(not(any(
                 feature = "capnproto",
                 feature = "serde_cbor",
-                feature = "bincode"
+                feature = "bincode",
+                feature = "speedy"
                 )))]
         {
             NoSerializationDefined::ZZZZZ;
@@ -295,6 +340,12 @@ impl KvStore {
                 .with_context(|| LogAppendSet { key: key.clone(), value: value.clone() })?;
         }
 
+        #[cfg(feature = "speedy")]
+        {
+            LogEntry::Set { key: key.clone(), value: value.clone() }.write_to_stream(&mut std::io::BufWriter::new(&mut self.log_f))
+                .with_context(|| LogAppendSet { key: key.clone(), value: value.clone() })?;
+        }
+
         if self.safe {
             self.log_f.sync_all().with_context(|| LogSync { key })?;
         }
@@ -329,6 +380,11 @@ impl KvStore {
         #[cfg(feature = "bincode")]
         {
             bincode::serialize_into(&mut std::io::BufWriter::new(&mut self.log_f), &LogEntry::Remove { key: key.clone() })
+                .with_context(|| LogAppendRemove { key: key.clone() })?;
+        }
+        #[cfg(feature = "speedy")]
+        {
+            LogEntry::Remove { key: key.clone() }.write_to_stream(&mut std::io::BufWriter::new(&mut self.log_f))
                 .with_context(|| LogAppendRemove { key: key.clone() })?;
         }
 
